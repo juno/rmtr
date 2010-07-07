@@ -81,8 +81,10 @@ rmtrは、Redmineのチケットに対する作業時間の記録をコマンド
     ============================================================
     作業時間を記録しました。
 
+適宜、エイリアスを定義してご活用ください。
+
 
 ライセンス
 ----
 
-rmtrのライセンスは[MIT license]: http://creativecommons.org/licenses/MIT/です。
+rmtrのライセンスは[MIT license](http://creativecommons.org/licenses/MIT/)です。
