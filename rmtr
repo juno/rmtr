@@ -1,0 +1,220 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+
+require 'optparse'
+require 'logger'
+require 'yaml'
+
+require 'rubygems'
+require 'mechanize'
+
+
+module Redmine
+  # Redmine::Activityの配列
+  @@activities = []
+
+  # 定義されているすべての活動を返します。
+  #
+  # @return [Array<Redmine::Activity>] 定義されてる活動の配列
+  def self.activities
+    @@activities
+  end
+
+  # 活動を定義します。
+  #
+  #  Redmine.define_activities do
+  #    activity :key => 'c', :label => 'コーディング', :activity_id => 9
+  #  end
+  #
+  # @param [Proc] block
+  def self.define_activities(&block)
+    module_eval &block
+  end
+
+
+  private
+
+  # 活動を定義します。
+  #
+  #  activity :key => 'c', :label => 'コーディング', :activity_id => 9
+  #
+  # @param [Hash{Symbol => String,Integer}] params
+  def self.activity(params)
+    @@activities << Activity.new(params)
+  end
+
+
+  class TimelogRecorder
+    attr_accessor :base_url, :username, :password, :logging, :logfile
+
+    def config(&block)
+      instance_eval &block
+    end
+
+    # @param [Redmine::Timelog] log 記録する作業時間
+    def record(log)
+      agent = Mechanize.new do |m|
+        m.log = Logger.new(@logfile) if @logging
+      end
+      agent.redirect_ok = false
+
+      login agent
+      update_issue(agent, log)
+    end
+
+    # @param [Mechanize] agent
+    def login(agent)
+      login_page = agent.get "#{@base_url}/login"
+      login_form = login_page.forms[1]
+      login_form.field_with(:name => 'username').value = @username
+      login_form.field_with(:name => 'password').value = @password
+      agent.submit login_form
+    end
+
+    # @param [Mechanize] agent
+    # @param [Redmine::Timelog] log
+    def update_issue(agent, log)
+      timelog_edit_page = agent.get "#{@base_url}/timelog/edit?issue_id=#{log.issue_id}"
+      timelog_edit_form = timelog_edit_page.forms[1]
+      timelog_edit_form.field_with(:name => 'time_entry[hours]').value = log.hours
+      timelog_edit_form.field_with(:name => 'time_entry[activity_id]').value = log.activity_id
+      (timelog_edit_form.field_with(:name => 'time_entry[spent_on]').value = log.spent_on) if log.spent_on
+      (timelog_edit_form.field_with(:name => 'time_entry[comments]').value = log.comment) if log.comment
+      agent.submit timelog_edit_form
+    end
+  end
+
+
+  # Redmineにおける活動の定義をあらわすクラス。
+  class Activity
+    attr_accessor :key, :label, :activity_id
+
+    # 新しいインスタンスを生成します。
+    #
+    # @param [Hash{Symbol => String,Integer}] params
+    def initialize(params)
+      @key = params[:key] || nil
+      @label = params[:label] || nil
+      @activity_id = params[:activity_id] || nil
+    end
+  end
+
+
+  # Redmineにおける作業時間をあらわすクラス。
+  class TimeLog
+    attr_accessor :issue_id, :hours, :activity, :comment, :spent_on
+
+    # 活動を設定します。
+    #
+    # @param [String] key 活動をあらわすキー文字列
+    def activity=(key)
+      @activity = Redmine.activities.find {|i| i.key == key }
+    end
+
+    # 設定されている活動のRedmineにおけるIDを返します。
+    #
+    # @return [Integer]
+    def activity_id
+      @activity.activity_id.to_i
+    end
+
+    # 設定されている活動のRedmineにおける表示名を返します。
+    #
+    # @return [String]
+    def activity_label
+      @activity.label
+    end
+
+    # 作業時間の文字列表現を返します。
+    #
+    # @return [String]
+    def to_s
+      buf = ''
+      buf << '=' * 60 + "\n"
+      buf << "チケット ##{@issue_id}\n"
+      buf << '-' * 60 + "\n"
+      buf << "日付    : #{@spent_on}\n" if @spent_on
+      buf << "時間    : #{@hours}\n"
+      buf << "コメント: #{@comment}\n" if @comment
+      buf << "作業    : #{activity_label}\n"
+      buf << '=' * 60 + "\n"
+    end
+
+    # 作業時間の記録に必要な情報が設定されているかどうかを返します。
+    #
+    # @return [Boolean]
+    def valid?
+      @issue_id && @hours && @activity
+    end
+  end
+end
+
+
+# スクリプトの使用方法を表示して、スクリプトの実行を終了します。
+def usage
+  puts "rmt - Redmine Timelog Recorder"
+  puts
+  puts "  Usage:"
+  puts "    #{$0} -a <活動> -i <チケットID> -t [時間] [-cd]"
+  puts
+  puts "  Options:"
+  puts "    -a value, --activity=value        活動"
+  Redmine.activities.each do |activity|
+    puts " " * 38 + "#{activity.key}  #{activity.label}"
+  end
+  puts "    -c value, --comment=value         コメント"
+  puts "    -d YYYY-MM-DD, --date=YYYY-MM-DD  日付"
+  puts "    -i id, --issue=id                 チケットID"
+  puts "    -t n, --hours=n                   時間"
+  puts
+  puts "  Example:"
+  puts "    #{$0} -i 10000 -a c -t 3"
+  puts "      チケット#10000に3時間のコーディングを記録"
+  puts "    #{$0} -i 10000 -a t -t 0.5 -c 'テストをしました'"
+  puts "      チケット#10000に0.5時間のテストをコメントつきで記録"
+  puts
+  exit
+end
+
+# ~/rmtr.yml ファイルを設定ファイルとして読み込み、設定情報を含むハッシュを返します。
+#
+# @return [Hash]
+def load_config
+  YAML.load_file(File.expand_path('~/.rmtr.yml'))
+end
+
+
+if __FILE__ == $0
+  config = load_config
+
+  Redmine.define_activities do
+    config['redmine']['activities'].each do |i|
+      activity :key => i['key'], :label => i['label'], :activity_id => i['id']
+    end
+  end
+
+  log = Redmine::TimeLog.new
+  ARGV.options do |option|
+    option.on('-a VAL', '--activity=VAl') {|v| log.activity = v }
+    option.on('-c VAL', '--comment=VAL') {|v| log.comment = v }
+    option.on('-d VAL', '--date=VAL') {|v| log.spent_on = v }
+    option.on('-i VAL', '--id=VAL') {|v| log.issue_id = v }
+    option.on('-t VAL', '--hours=VAL') {|v| log.hours = v }
+    option.parse!
+  end
+
+  usage unless log.valid?
+
+  recorder = Redmine::TimelogRecorder.new
+  recorder.config do |c|
+    c.base_url = config['redmine']['base_url']
+    c.username = config['redmine']['username']
+    c.password = config['redmine']['password']
+    c.logging = config['log']['enable']
+    c.logfile = config['log']['path']
+  end
+  recorder.record log
+
+  puts log
+  puts "作業時間を記録しました。"
+end
